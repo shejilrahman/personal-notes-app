@@ -469,7 +469,8 @@
                         <Border CornerRadius="7" Background="{DynamicResource CardFill}" BorderBrush="{DynamicResource CardEdge}" BorderThickness="1"/>
                         <Border x:Name="hover" CornerRadius="7" Background="{DynamicResource CardFill}" BorderBrush="{DynamicResource AccentSolid}" BorderThickness="1" Opacity="0"/>
                         <Border x:Name="done" CornerRadius="7" Background="{DynamicResource GoodSoft}" BorderBrush="{DynamicResource Good}" BorderThickness="1" Opacity="0"/>
-                        <ContentPresenter Margin="8,2,8,3" VerticalAlignment="Center"/>
+                        <!-- the content is the card's text followed by its small close (x) button -->
+                        <ContentPresenter Margin="8,2,4,3" VerticalAlignment="Center"/>
                     </Grid>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
@@ -500,6 +501,54 @@
                             <Setter TargetName="done" Property="Opacity" Value="1"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- The x at the right end of a card: turns the card back into normal text. -->
+    <Style x:Key="CardClose" TargetType="Button">
+        <Setter Property="Width" Value="16"/>
+        <Setter Property="Height" Value="16"/>
+        <Setter Property="Margin" Value="5,1,0,0"/>
+        <Setter Property="VerticalAlignment" Value="Center"/>
+        <Setter Property="Foreground" Value="{DynamicResource CardText}"/>
+        <Setter Property="FontFamily" Value="{StaticResource IconFont}"/>
+        <Setter Property="FontSize" Value="8"/>
+        <Setter Property="FontWeight" Value="Normal"/>
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Grid x:Name="root" Opacity="0.6">
+                        <Ellipse x:Name="back" Fill="{DynamicResource Danger}" Opacity="0"/>
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="root" Property="Opacity" Value="1"/>
+                            <Setter TargetName="back" Property="Opacity" Value="1"/>
+                            <Setter Property="Foreground" Value="White"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- The details box: plain look, text and cards together, always editable. -->
+    <Style x:Key="PlainRich" TargetType="RichTextBox">
+        <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+        <Setter Property="CaretBrush" Value="{DynamicResource AccentSolid}"/>
+        <Setter Property="SelectionBrush" Value="{DynamicResource AccentSolid}"/>
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="RichTextBox">
+                    <ScrollViewer x:Name="PART_ContentHost" Background="Transparent"/>
                 </ControlTemplate>
             </Setter.Value>
         </Setter>

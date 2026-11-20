@@ -269,7 +269,8 @@ namespace PersonalNotes
     // Cards are parts of a note's details wrapped in [[ ]], e.g. "phone : [[889355556]]".
     internal static class Cards
     {
-        public static readonly Regex Pattern = new Regex(@"\[\[(.+?)\]\]");
+        // A card's text is on one line and has no square brackets of its own.
+        public static readonly Regex Pattern = new Regex(@"\[\[([^\[\]\r\n]+)\]\]");
 
         // The text as you would read it, without the [[ ]] marks.
         public static string Plain(string text)
@@ -399,16 +400,16 @@ namespace PersonalNotes
 
         // Elements from MainView.xaml
         private readonly Grid root;
-        private readonly TextBox titleBox, bodyBox, searchBox;
+        private readonly TextBox titleBox, searchBox;
+        private readonly RichTextBox bodyBox;   // the details: plain text plus cards, always editable
         private readonly ListBox notesList;
         private readonly Button newButton, favButton, deleteButton, micButton, pasteButton, themeButton, eyeButton, dialogOk, dialogCancel;
         private readonly RadioButton allTab, favTab;
         private readonly TextBlock metaText, statusText, countText, micIcon, micLabel, emptyTitle, emptyText, emptyIcon, dialogTitle, dialogText;
         private readonly Ellipse statusDot;
         private readonly StackPanel emptyState, pasteItems, shortcutRows;
-        private readonly ScrollViewer bodyView;   // the details drawn with their cards (shown while not typing)
-        private readonly TextBlock bodyText;
-        private readonly Button modeButton, cardButton;
+        private readonly TextBlock bodyHint;
+        private readonly Button cardButton;
         private readonly Popup pastePopup, shortcutsPopup;
         private readonly Grid dialogLayer;
         private Action dialogConfirm;
@@ -462,7 +463,7 @@ namespace PersonalNotes
             Content = root;
 
             titleBox = Find<TextBox>("TitleBox");
-            bodyBox = Find<TextBox>("BodyBox");
+            bodyBox = Find<RichTextBox>("BodyBox");
             searchBox = Find<TextBox>("SearchBox");
             notesList = Find<ListBox>("NotesList");
             newButton = Find<Button>("NewButton");
@@ -493,18 +494,13 @@ namespace PersonalNotes
             pastePopup = Find<Popup>("PastePopup");
             shortcutsPopup = Find<Popup>("ShortcutsPopup");
             dialogLayer = Find<Grid>("DialogLayer");
-            bodyView = Find<ScrollViewer>("BodyView");
-            bodyText = Find<TextBlock>("BodyText");
-            modeButton = Find<Button>("ModeButton");
+            bodyHint = Find<TextBlock>("BodyHint");
             cardButton = Find<Button>("CardButton");
-            modeButton.Click += delegate { ToggleBodyMode(); };
             cardButton.Click += delegate { MakeCardFromSelection(); };
-            bodyView.MouseLeftButtonDown += BodyViewMouseDown;
-            // When typing stops (focus goes to another program or another part of the app), show the cards.
-            bodyBox.LostKeyboardFocus += delegate
-            {
-                Dispatcher.BeginInvoke((Action)delegate { if (!bodyBox.IsKeyboardFocused && !ViewingCards) ShowCards(); });
-            };
+            cardStyle = (Style)FindResource("InlineCard");
+            cardEditorStyle = (Style)FindResource("CardEditor");
+            CommandManager.AddPreviewExecutedHandler(bodyBox, BodyCommand);
+            DataObject.AddPastingHandler(bodyBox, BodyPasting);
 
             notesList.ItemsSource = visible;
             if (favouritesOnly) favTab.IsChecked = true;
@@ -513,7 +509,7 @@ namespace PersonalNotes
 
             // Editing
             titleBox.TextChanged += delegate { EditorChanged(); };
-            bodyBox.TextChanged += delegate { EditorChanged(); };
+            bodyBox.TextChanged += delegate { BodyChanged(); };
             titleBox.LostKeyboardFocus += delegate { SaveCurrent(); ShowStoredName(); };
             searchBox.TextChanged += delegate { RebuildList(false); };
             notesList.SelectionChanged += delegate { ListSelectionChanged(); };
@@ -894,8 +890,7 @@ namespace PersonalNotes
         private void FocusEditor()
         {
             // A new note starts with its name; an existing one continues in the details.
-            TextBox target = current != null && current.IsBlank ? titleBox : bodyBox;
-            if (target == bodyBox && ViewingCards) return;   // the cards are showing, ready to be clicked
+            Control target = current != null && current.IsBlank ? (Control)titleBox : bodyBox;
             target.Focus();
             Keyboard.Focus(target);
         }
@@ -1149,7 +1144,7 @@ namespace PersonalNotes
             }
 
             current = target;
-            if (titleBox.Text != current.Name || bodyBox.Text != current.Body) LoadEditor();
+            if (titleBox.Text != current.Name || bodyRaw != current.Body) LoadEditor();
             RebuildList(false);
             OpenFirstListedIfHidden();
             UpdateMeta();
@@ -1163,15 +1158,14 @@ namespace PersonalNotes
             titleBox.IsUndoEnabled = false;
             bodyBox.IsUndoEnabled = false;
             titleBox.Text = current.Name;
-            bodyBox.Text = current.Body;
+            ApplyBody(current.Body, current.Body.Length);   // caret at the end, ready to continue typing
             titleBox.IsUndoEnabled = true;
             bodyBox.IsUndoEnabled = true;
             titleBox.CaretIndex = titleBox.Text.Length;
-            bodyBox.CaretIndex = bodyBox.Text.Length;
-            bodyBox.ScrollToEnd();
+            bodyBox.ScrollToHome();
             loadingEditor = false;
             dirty = false;
-            ShowCards();   // cards if the note has any, otherwise the editing box (also refreshes the line under the name)
+            UpdateMeta();
         }
 
         // Fills the list from the search box and the All/Favourites switch. With
@@ -1319,11 +1313,10 @@ namespace PersonalNotes
         {
             if (loadingEditor || current == null) return;
             current.Name = titleBox.Text;
-            current.Body = bodyBox.Text;
+            current.Body = bodyRaw;
             dirty = true;
             saveTimer.Stop();
             saveTimer.Start();
-            UpdateModeButton();
             UpdateStatus();
         }
 
@@ -1410,7 +1403,7 @@ namespace PersonalNotes
             if (!dirty || current == null) return;
 
             string name = titleBox.Text.Trim();
-            string body = bodyBox.Text;
+            string body = bodyRaw;
             if (current.FilePath == null && name.Length == 0 && body.Trim().Length == 0)
             {
                 dirty = false;
@@ -1511,9 +1504,7 @@ namespace PersonalNotes
                 : when.Date == DateTime.Now.Date.AddDays(-1) ? "yesterday"
                 : when.ToString(when.Year == DateTime.Now.Year ? "d MMMM" : "d MMMM yyyy");
             string edited = "Edited " + day + " at " + when.ToString("t");
-            metaText.Text = ViewingCards
-                ? "Click a card to copy it  ·  double-click a card or the text to edit  ·  " + edited
-                : edited + "  ·  Documents\\Personal Notes\\" + IOPath.GetFileName(current.FilePath);
+            metaText.Text = edited + "  ·  Documents\\Personal Notes\\" + IOPath.GetFileName(current.FilePath);
         }
 
         private void SetStatus(string text, string colourKey)
@@ -1618,105 +1609,218 @@ namespace PersonalNotes
 
         // --------------------------------------------------------------- Cards
         //
-        // A part of the details wrapped in [[ ]] is a card. While the note is not
-        // being typed in, the details are drawn with every card as a coloured box
-        // inside the text: one click copies it, a double-click edits it.
-        // Double-clicking the text itself brings back the plain editing box.
+        // The details are always editable: click and type. A part saved as
+        // [[text]] is a card, drawn as a coloured box inside the text. One click
+        // on a card copies it, a double-click edits it, and its small x turns it
+        // back into ordinary text. Typing [[text]] also makes a card.
 
-        private bool ViewingCards
-        {
-            get { return bodyView.Visibility == Visibility.Visible; }
-        }
+        private string bodyRaw = "";    // the details as saved: plain text, each card written as [[value]]
+        private bool tidyPending;
+        private Style cardStyle, cardEditorStyle;
 
-        // Shows the details with their cards, or the plain editing box when there are none.
-        private void ShowCards()
+        // Reads the document between two places as text. Cards are written as
+        // [[value]] (withMarks) or just as their value. Every card met is added to 'found'.
+        private string ReadBody(TextPointer from, TextPointer end, bool withMarks, List<InlineUIContainer> found)
         {
-            if (!Cards.Pattern.IsMatch(bodyBox.Text))
+            StringBuilder text = new StringBuilder();
+            bool firstParagraph = from.CompareTo(bodyBox.Document.ContentStart) == 0;
+            TextPointer p = from;
+            while (p != null && p.CompareTo(end) < 0)
             {
-                ShowEditor(false, -1);
-                return;
+                TextPointerContext context = p.GetPointerContext(LogicalDirection.Forward);
+                if (context == TextPointerContext.Text)
+                {
+                    string run = p.GetTextInRun(LogicalDirection.Forward);
+                    int toEnd = p.GetOffsetToPosition(end);
+                    if (toEnd < run.Length)
+                    {
+                        text.Append(run, 0, Math.Max(0, toEnd));
+                        break;
+                    }
+                    text.Append(run);
+                    p = p.GetPositionAtOffset(run.Length);
+                    continue;
+                }
+                if (context == TextPointerContext.ElementStart)
+                {
+                    DependencyObject element = p.GetAdjacentElement(LogicalDirection.Forward);
+                    InlineUIContainer holder = element as InlineUIContainer;
+                    if (holder != null)
+                    {
+                        string value = holder.Tag as string ?? "";
+                        if (value.Length > 0) text.Append(withMarks ? "[[" + value + "]]" : value);
+                        if (found != null) found.Add(holder);
+                        p = holder.ElementEnd;
+                        continue;
+                    }
+                    if (element is Paragraph)
+                    {
+                        if (!firstParagraph) text.Append("\r\n");
+                        firstParagraph = false;
+                    }
+                    else if (element is LineBreak)
+                    {
+                        text.Append("\r\n");
+                    }
+                }
+                p = p.GetNextContextPosition(LogicalDirection.Forward);
             }
-            RenderCards();
-            bodyBox.Visibility = Visibility.Collapsed;
-            bodyView.Visibility = Visibility.Visible;
-            UpdateModeButton();
-            UpdateMeta();
+            return text.ToString();
         }
 
-        private void ShowEditor(bool focus, int caret)
+        // How far into the saved text a place in the document is.
+        private int RawOffset(TextPointer place)
         {
-            bodyView.Visibility = Visibility.Collapsed;
-            bodyBox.Visibility = Visibility.Visible;
-            if (focus)
+            return ReadBody(bodyBox.Document.ContentStart, place, true, null).Length;
+        }
+
+        // The place in the document for a position in the saved text.
+        private TextPointer PointerAt(int offset)
+        {
+            int remaining = offset;
+            bool firstParagraph = true;
+            TextPointer p = bodyBox.Document.ContentStart;
+            while (p != null)
             {
-                bodyBox.Focus();
-                Keyboard.Focus(bodyBox);
-                bodyBox.CaretIndex = caret < 0 ? bodyBox.Text.Length : Math.Min(caret, bodyBox.Text.Length);
+                TextPointerContext context = p.GetPointerContext(LogicalDirection.Forward);
+                if (context == TextPointerContext.Text)
+                {
+                    int length = p.GetTextRunLength(LogicalDirection.Forward);
+                    if (remaining <= length) return p.GetPositionAtOffset(remaining);
+                    remaining -= length;
+                    p = p.GetPositionAtOffset(length);
+                    continue;
+                }
+                if (context == TextPointerContext.ElementStart)
+                {
+                    DependencyObject element = p.GetAdjacentElement(LogicalDirection.Forward);
+                    InlineUIContainer holder = element as InlineUIContainer;
+                    Paragraph paragraph = element as Paragraph;
+                    if (holder != null)
+                    {
+                        if (remaining <= 0) return p;
+                        remaining -= (holder.Tag as string ?? "").Length + 4;
+                        p = holder.ElementEnd;
+                        if (remaining <= 0) return p;
+                        continue;
+                    }
+                    if (paragraph != null)
+                    {
+                        if (!firstParagraph) remaining -= 2;
+                        firstParagraph = false;
+                        if (remaining <= 0) return paragraph.ContentStart;
+                    }
+                    else if (element is LineBreak)
+                    {
+                        remaining -= 2;
+                        if (remaining <= 0) return ((LineBreak)element).ElementEnd;
+                    }
+                }
+                p = p.GetNextContextPosition(LogicalDirection.Forward);
             }
-            UpdateModeButton();
-            UpdateMeta();
+            return bodyBox.Document.ContentEnd;
         }
 
-        // The pencil / tick button next to the note name.
-        private void UpdateModeButton()
+        // Fills the editing box from saved text: one paragraph per line, a coloured box per [[card]].
+        private void BuildDocument(string raw)
         {
-            bool viewing = ViewingCards;
-            modeButton.Visibility = viewing || Cards.Pattern.IsMatch(bodyBox.Text) ? Visibility.Visible : Visibility.Collapsed;
-            modeButton.Content = viewing ? "" : "";
-            modeButton.ToolTip = viewing ? "Edit the text (you can also double-click it)" : "Done: show the cards";
-        }
-
-        private void ToggleBodyMode()
-        {
-            if (ViewingCards) ShowEditor(true, -1);
-            else ShowCards();
-        }
-
-        // Builds the read view: plain text with a coloured box for every [[card]].
-        private void RenderCards()
-        {
-            string raw = bodyBox.Text;
-            bodyText.Inlines.Clear();
-            int at = 0;
-            foreach (Match card in Cards.Pattern.Matches(raw))
+            FlowDocument document = bodyBox.Document;
+            document.Blocks.Clear();
+            foreach (string line in raw.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
             {
-                if (card.Index > at) AddPlainText(raw.Substring(at, card.Index - at), at);
-                bodyText.Inlines.Add(MakeCard(card.Groups[1].Value, card.Index, card.Length));
-                at = card.Index + card.Length;
+                Paragraph paragraph = new Paragraph();
+                int at = 0;
+                foreach (Match card in Cards.Pattern.Matches(line))
+                {
+                    if (card.Index > at) paragraph.Inlines.Add(new Run(line.Substring(at, card.Index - at)));
+                    paragraph.Inlines.Add(MakeCard(card.Groups[1].Value));
+                    at = card.Index + card.Length;
+                }
+                if (at < line.Length) paragraph.Inlines.Add(new Run(line.Substring(at)));
+                document.Blocks.Add(paragraph);
             }
-            if (at < raw.Length) AddPlainText(raw.Substring(at), at);
         }
 
-        private void AddPlainText(string text, int startInNote)
+        // Replaces what the editing box shows with 'raw' and puts the caret at 'caret' (a position in raw).
+        private void ApplyBody(string raw, int caret)
         {
-            Run run = new Run(text);
-            run.Tag = startInNote;   // lets a double-click find the matching place in the editing box
-            bodyText.Inlines.Add(run);
+            bool wasLoading = loadingEditor;
+            loadingEditor = true;
+            BuildDocument(raw);
+            bodyBox.CaretPosition = PointerAt(caret);
+            loadingEditor = wasLoading;
+            bodyRaw = raw;
+            bodyHint.Visibility = raw.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
         }
 
-        private InlineUIContainer MakeCard(string value, int startInNote, int lengthInNote)
+        private bool IsOurCard(InlineUIContainer holder)
+        {
+            FrameworkElement child = holder.Child as FrameworkElement;
+            return holder.Tag is string && child != null && (child.Style == cardStyle || child.Style == cardEditorStyle);
+        }
+
+        // Runs after every change in the editing box.
+        private void BodyChanged()
+        {
+            if (loadingEditor) return;
+            List<InlineUIContainer> holders = new List<InlineUIContainer>();
+            bodyRaw = ReadBody(bodyBox.Document.ContentStart, bodyBox.Document.ContentEnd, true, holders);
+            bodyHint.Visibility = bodyRaw.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+            EditorChanged();
+
+            // Typed or pasted [[text]] becomes a card, and a card that lost its looks is redrawn.
+            bool needsTidy = Cards.Pattern.Matches(bodyRaw).Count != holders.Count || !holders.TrueForAll(IsOurCard);
+            if (needsTidy && !tidyPending)
+            {
+                tidyPending = true;
+                Dispatcher.BeginInvoke((Action)delegate
+                {
+                    tidyPending = false;
+                    ApplyBody(bodyRaw, RawOffset(bodyBox.CaretPosition));
+                });
+            }
+        }
+
+        private InlineUIContainer MakeCard(string value)
         {
             TextBlock label = new TextBlock();
             label.Text = value;
             label.TextTrimming = TextTrimming.CharacterEllipsis;
+            label.VerticalAlignment = VerticalAlignment.Center;
             label.LineHeight = double.NaN;   // not the roomy line height of the surrounding text, so the box stays compact
             label.LineStackingStrategy = LineStackingStrategy.MaxHeight;
 
+            Button close = new Button();
+            close.Style = (Style)FindResource("CardClose");
+            close.Content = "";
+            close.ToolTip = "Turn back into normal text";
+            close.ForceCursor = true;
+
+            DockPanel content = new DockPanel();
+            DockPanel.SetDock(close, Dock.Right);
+            content.Children.Add(close);
+            content.Children.Add(label);
+
             Button card = new Button();
-            card.Style = (Style)FindResource("InlineCard");
-            card.Content = label;
+            card.Style = cardStyle;
+            card.Content = content;
             card.ToolTip = "Click to copy  ·  double-click to edit";
+            card.ForceCursor = true;   // a hand, not the text cursor of the surrounding box
+            // Everything inside the card uses its own compact line height, not the note's roomy one.
+            TextBlock.SetLineHeight(card, double.NaN);
+            TextBlock.SetLineStackingStrategy(card, LineStackingStrategy.MaxHeight);
 
             InlineUIContainer holder = new InlineUIContainer(card);
             holder.BaselineAlignment = BaselineAlignment.Center;
-            holder.Tag = startInNote;
+            holder.Tag = value;
 
-            card.Click += delegate { CopyCard(card, value); };
+            card.Click += delegate { CopyCard(card, holder.Tag as string ?? ""); };
             card.MouseDoubleClick += delegate(object sender, MouseButtonEventArgs e)
             {
                 e.Handled = true;
-                EditCard(holder, value, startInNote, lengthInNote);
+                EditCard(holder, card, label);
             };
+            close.Click += delegate { TurnCardIntoText(holder); };
             return holder;
         }
 
@@ -1742,30 +1846,71 @@ namespace PersonalNotes
             timer.Start();
         }
 
-        // Double-click on a card: it becomes a small text box. Enter keeps the change, Esc drops it.
-        private void EditCard(InlineUIContainer holder, string value, int startInNote, int lengthInNote)
+        // The x on a card: the box goes away, its text stays in the note as normal text.
+        private void TurnCardIntoText(InlineUIContainer holder)
         {
+            if (holder.Parent == null) return;
+            string value = holder.Tag as string ?? "";
+            bodyBox.BeginChange();
+            try
+            {
+                if (value.Length > 0) holder.SiblingInlines.InsertBefore(holder, new Run(value));
+                holder.SiblingInlines.Remove(holder);
+            }
+            finally
+            {
+                bodyBox.EndChange();
+            }
+            SetStatus("Card closed  ·  the text stays", "Good");
+        }
+
+        // Double-click on a card: it becomes a small text box. Enter keeps the change, Esc drops it.
+        private void EditCard(InlineUIContainer holder, Button card, TextBlock label)
+        {
+            string value = holder.Tag as string ?? "";
             TextBox editor = new TextBox();
-            editor.Style = (Style)FindResource("CardEditor");
+            editor.Style = cardEditorStyle;
             editor.Text = value;
             TextBlock.SetLineHeight(editor, double.NaN);
             TextBlock.SetLineStackingStrategy(editor, LineStackingStrategy.MaxHeight);
             holder.Child = editor;
 
             bool finished = false;
-            Action<bool> finish = delegate(bool keep)
+            Action<bool, bool> finish = delegate(bool keep, bool backToNote)
             {
                 if (finished) return;
                 finished = true;
-                if (keep) ReplaceCard(startInNote, lengthInNote, editor.Text);
-                ShowCards();
+                string newValue = editor.Text.Replace("[", "").Replace("]", "").Replace("\r", "").Replace("\n", " ").Trim();
+                if (holder.Parent == null) return;   // the card was deleted meanwhile
+
+                TextPointer after = holder.ElementEnd;
+                if (keep && newValue.Length == 0)
+                {
+                    after = holder.ElementStart.GetInsertionPosition(LogicalDirection.Backward);
+                    holder.SiblingInlines.Remove(holder);   // emptied: the card is removed
+                }
+                else
+                {
+                    if (keep)
+                    {
+                        holder.Tag = newValue;
+                        label.Text = newValue;
+                    }
+                    holder.Child = card;
+                }
+                BodyChanged();
+                if (backToNote)
+                {
+                    bodyBox.Focus();
+                    if (after != null) bodyBox.CaretPosition = after;
+                }
             };
             editor.PreviewKeyDown += delegate(object sender, KeyEventArgs e)
             {
-                if (e.Key == Key.Enter) { e.Handled = true; finish(true); }
-                else if (e.Key == Key.Escape) { e.Handled = true; finish(false); }
+                if (e.Key == Key.Enter) { e.Handled = true; finish(true, true); }
+                else if (e.Key == Key.Escape) { e.Handled = true; finish(false, true); }
             };
-            editor.LostKeyboardFocus += delegate { finish(true); };
+            editor.LostKeyboardFocus += delegate { finish(true, false); };
 
             Dispatcher.BeginInvoke(DispatcherPriority.Input, (Action)delegate
             {
@@ -1775,65 +1920,20 @@ namespace PersonalNotes
             });
         }
 
-        // Writes an edited card back into the note's text. Emptying a card removes it.
-        private void ReplaceCard(int startInNote, int lengthInNote, string newValue)
-        {
-            string raw = bodyBox.Text;
-            if (startInNote + lengthInNote > raw.Length) return;
-            Match existing = Cards.Pattern.Match(raw, startInNote);
-            if (!existing.Success || existing.Index != startInNote || existing.Length != lengthInNote) return;   // the text changed meanwhile
-
-            newValue = newValue.Replace("[[", "").Replace("]]", "").Replace("\r", "").Replace("\n", " ").Trim();
-            if (newValue == existing.Groups[1].Value) return;
-            string replacement = newValue.Length > 0 ? "[[" + newValue + "]]" : "";
-            bodyBox.Text = raw.Substring(0, startInNote) + replacement + raw.Substring(startInNote + lengthInNote);   // saved by the usual auto-save
-        }
-
-        // Double-click on the text (not on a card): switch to the editing box, caret where you clicked.
-        private void BodyViewMouseDown(object sender, MouseButtonEventArgs e)
-        {
-            e.Handled = true;   // the read view is for clicking cards, not for dragging the window
-            if (e.ClickCount != 2) return;
-
-            int caret = -1;
-            try
-            {
-                TextPointer pointer = bodyText.GetPositionFromPoint(e.GetPosition(bodyText), true);
-                Run run = pointer != null ? pointer.Parent as Run : null;
-                if (run != null && run.Tag is int) caret = (int)run.Tag + new TextRange(run.ContentStart, pointer).Text.Length;
-            }
-            catch (Exception) { }
-            ShowEditor(true, caret);
-        }
-
-        // "Make card" button / Ctrl+Q: wraps the selected text in [[ ]], or unwraps the card the caret is in.
+        // "Make card" button / Ctrl+Q: the selected text becomes a card straight away.
+        // Selecting exactly one existing card and pressing it again turns that card back into text.
         private void MakeCardFromSelection()
         {
-            if (ViewingCards)
+            if (bodyBox.Selection.IsEmpty)
             {
-                SetStatus("Double-click the text to edit it, select a part, then press Make card", "Warn");
+                SetStatus("Select the part of the text that should become a card, then press Make card", "Warn");
                 return;
             }
 
-            string text = bodyBox.Text;
-            int start = bodyBox.SelectionStart;
-            int length = bodyBox.SelectionLength;
-
-            if (length == 0)
-            {
-                // Caret inside a card: turn that card back into ordinary text.
-                foreach (Match card in Cards.Pattern.Matches(text))
-                {
-                    if (start < card.Index || start > card.Index + card.Length) continue;
-                    bodyBox.Select(card.Index, card.Length);
-                    bodyBox.SelectedText = card.Groups[1].Value;
-                    bodyBox.Select(card.Index + card.Groups[1].Length, 0);
-                    SetStatus("Card removed  ·  the text stays", "Good");
-                    return;
-                }
-                SetStatus("Select the part of the text that should become a card", "Warn");
-                return;
-            }
+            string text = bodyRaw;
+            int start = RawOffset(bodyBox.Selection.Start);
+            int length = RawOffset(bodyBox.Selection.End) - start;
+            if (start < 0 || length <= 0 || start + length > text.Length) return;
 
             // Ignore spaces picked up at either end of the selection.
             string selected = text.Substring(start, length);
@@ -1843,7 +1943,7 @@ namespace PersonalNotes
             length -= leading + trailing;
             if (length <= 0)
             {
-                SetStatus("Select the part of the text that should become a card", "Warn");
+                SetStatus("Select the part of the text that should become a card, then press Make card", "Warn");
                 return;
             }
             string value = text.Substring(start, length);
@@ -1854,31 +1954,62 @@ namespace PersonalNotes
                 return;
             }
 
-            // Selecting an existing card (with or without its brackets) unwraps it.
             Match whole = Cards.Pattern.Match(value);
-            bool isWholeCard = whole.Success && whole.Length == value.Length;
-            bool isInsideCard = start >= 2 && start + length + 2 <= text.Length
-                && text.Substring(start - 2, 2) == "[[" && text.Substring(start + length, 2) == "]]";
-            if (isWholeCard || isInsideCard)
+            if (whole.Success && whole.Length == value.Length)
             {
-                string inner = isWholeCard ? whole.Groups[1].Value : value;
-                if (isInsideCard) bodyBox.Select(start - 2, length + 4);
-                else bodyBox.Select(start, length);
-                bodyBox.SelectedText = inner;
-                bodyBox.Select(bodyBox.SelectionStart + inner.Length, 0);
-                SetStatus("Card removed  ·  the text stays", "Good");
+                // Exactly one card selected: back to normal text.
+                string inner = whole.Groups[1].Value;
+                ApplyBody(text.Substring(0, start) + inner + text.Substring(start + length), start + inner.Length);
+                EditorChanged();
+                SetStatus("Card closed  ·  the text stays", "Good");
                 return;
             }
-            if (value.Contains("[[") || value.Contains("]]"))
+            if (value.IndexOfAny(new char[] { '[', ']' }) >= 0)
             {
-                SetStatus("That part already contains a card. Select only plain text", "Warn");
+                SetStatus(value.Contains("[[") ? "That part already contains a card. Select only normal text" : "A card cannot contain [ or ]", "Warn");
                 return;
             }
 
-            bodyBox.Select(start, length);
-            bodyBox.SelectedText = "[[" + value + "]]";
-            bodyBox.Select(start + length + 4, 0);
-            SetStatus("Card made  ·  press the tick (or click outside the text) to see it", "Good");
+            ApplyBody(text.Substring(0, start) + "[[" + value + "]]" + text.Substring(start + length), start + length + 4);
+            EditorChanged();
+            SetStatus("Card made  ·  click it to copy", "Good");
+        }
+
+        // Copy and cut put plain text on the clipboard (a card gives its text); the
+        // formatting shortcuts of the editing box (bold, bullets...) are switched off
+        // because notes are saved as plain text.
+        private void BodyCommand(object sender, ExecutedRoutedEventArgs e)
+        {
+            if (e.OriginalSource is TextBox) return;   // a card that is being edited handles its own keys
+
+            if (e.Command == ApplicationCommands.Copy || e.Command == ApplicationCommands.Cut)
+            {
+                if (!bodyBox.Selection.IsEmpty)
+                {
+                    string text = ReadBody(bodyBox.Selection.Start, bodyBox.Selection.End, false, null);
+                    if (PutOnClipboard(text) && e.Command == ApplicationCommands.Cut) bodyBox.Selection.Text = "";
+                }
+                e.Handled = true;
+            }
+            else if (e.Command == EditingCommands.ToggleBold || e.Command == EditingCommands.ToggleItalic
+                || e.Command == EditingCommands.ToggleUnderline || e.Command == EditingCommands.ToggleBullets
+                || e.Command == EditingCommands.ToggleNumbering || e.Command == EditingCommands.ToggleSubscript
+                || e.Command == EditingCommands.ToggleSuperscript || e.Command == EditingCommands.IncreaseFontSize
+                || e.Command == EditingCommands.DecreaseFontSize || e.Command == EditingCommands.AlignCenter
+                || e.Command == EditingCommands.AlignRight || e.Command == EditingCommands.AlignJustify
+                || e.Command == EditingCommands.AlignLeft || e.Command == EditingCommands.IncreaseIndentation
+                || e.Command == EditingCommands.DecreaseIndentation)
+            {
+                e.Handled = true;
+            }
+        }
+
+        // Whatever is pasted goes in as plain text.
+        private void BodyPasting(object sender, DataObjectPastingEventArgs e)
+        {
+            if (e.DataObject.GetDataPresent(DataFormats.UnicodeText)) e.FormatToApply = DataFormats.UnicodeText;
+            else if (e.DataObject.GetDataPresent(DataFormats.Text)) e.FormatToApply = DataFormats.Text;
+            else e.CancelCommand();
         }
 
         // The earlier version kept these pieces in a separate "Quick copy" list
@@ -1962,8 +2093,8 @@ namespace PersonalNotes
             pasteItems.Children.Add(MenuCaption("EACH CTRL+V PASTES THE NEXT ONE OF", new Thickness(12, 8, 12, 6)));
             AddPasteChoice("", "Selected notes", DetailsOf(TargetNotes()));
             AddPasteChoice("", "Favourite notes", DetailsOf(notes.Where(delegate(Note n) { return n.Favourite; }).ToList()));
-            AddPasteChoice("", "Lines of this note", LinesOf(Cards.Plain(bodyBox.Text)));
-            AddPasteChoice("", "Cards of this note", Cards.Values(bodyBox.Text));
+            AddPasteChoice("", "Lines of this note", LinesOf(Cards.Plain(bodyRaw)));
+            AddPasteChoice("", "Cards of this note", Cards.Values(bodyRaw));
             if (notesList.SelectedItems.Count < 2)
                 pasteItems.Children.Add(MenuCaption("Tip: Ctrl+click notes in the list to select several", new Thickness(12, 8, 12, 8)));
             pastePopup.PlacementTarget = pasteButton;
@@ -2201,11 +2332,10 @@ namespace PersonalNotes
 
         // ----------------------------------------------------------- Dictation
 
-        // The text box dictation goes into: the note name if you are in it, otherwise the details.
-        private TextBox DictationTarget()
+        // The box dictation goes into: the note name if you are in it, otherwise the details.
+        private Control DictationTarget()
         {
             if (titleBox.IsKeyboardFocused) return titleBox;
-            if (ViewingCards) ShowEditor(true, -1);   // dictation types into the editing box
             return bodyBox;
         }
 
@@ -2223,7 +2353,7 @@ namespace PersonalNotes
             }
             else
             {
-                TextBox target = DictationTarget();
+                Control target = DictationTarget();
                 target.Focus();
                 Keyboard.Focus(target);
                 Native.PressVoiceTypingShortcut();
@@ -2264,7 +2394,6 @@ namespace PersonalNotes
                 speech.SetInputToDefaultAudioDevice();
                 speech.RecognizeAsync(RecognizeMode.Multiple);
                 listening = true;
-                DictationTarget();   // make sure the editing box is showing
             }
             catch (Exception ex)
             {
@@ -2308,21 +2437,28 @@ namespace PersonalNotes
         {
             if (string.IsNullOrEmpty(spoken) || !IsVisible) return;
 
-            TextBox box = DictationTarget();
-            string text = box.Text;
-            int caret = box.SelectionStart;
-            bool atStart = caret == 0;
-            char previous = atStart ? '\n' : text[caret - 1];
-
-            int back = caret;
-            while (back > 0 && (text[back - 1] == ' ' || text[back - 1] == '\t')) back--;
-            bool newSentence = back == 0 || "\n.!?".IndexOf(text[back - 1]) >= 0;
+            // The text on the current line just before the caret decides spacing and capital letters.
+            bool intoTitle = titleBox.IsKeyboardFocused;
+            string before = intoTitle
+                ? titleBox.Text.Substring(0, titleBox.SelectionStart)
+                : bodyBox.CaretPosition.GetTextInRun(LogicalDirection.Backward);
+            bool atStart = before.Length == 0;
+            string trimmed = before.TrimEnd(' ', '\t');
+            bool newSentence = trimmed.Length == 0 || ".!?".IndexOf(trimmed[trimmed.Length - 1]) >= 0;
 
             if (newSentence && char.IsLower(spoken[0])) spoken = char.ToUpper(spoken[0]) + spoken.Substring(1);
-            if (!atStart && !char.IsWhiteSpace(previous)) spoken = " " + spoken;
+            if (!atStart && !char.IsWhiteSpace(before[before.Length - 1])) spoken = " " + spoken;
 
-            box.SelectedText = spoken;
-            box.CaretIndex = box.SelectionStart + box.SelectionLength;   // continue after the inserted words
+            if (intoTitle)
+            {
+                titleBox.SelectedText = spoken;
+                titleBox.CaretIndex = titleBox.SelectionStart + titleBox.SelectionLength;   // continue after the inserted words
+            }
+            else
+            {
+                bodyBox.Selection.Text = spoken;
+                bodyBox.CaretPosition = bodyBox.Selection.End;
+            }
             if (listening) UpdateStatus();
         }
 

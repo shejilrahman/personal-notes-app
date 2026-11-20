@@ -107,7 +107,6 @@
                      FontFamily="{StaticResource DisplayFont}" FontSize="27" FontWeight="SemiBold" VerticalAlignment="Center"
                      ToolTip="The note's name. Click to rename it."/>
             <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="12,0,0,0" VerticalAlignment="Center">
-                <Button x:Name="ModeButton" Style="{StaticResource IconButton}" Content="&#xE70F;" Visibility="Collapsed" ToolTip="Edit the text (you can also double-click it)"/>
                 <Button x:Name="FavButton" Style="{StaticResource IconButton}" Content="&#xE734;" ToolTip="Add to favourites (Ctrl+D)"/>
                 <Button x:Name="DeleteButton" Style="{StaticResource IconButton}" Content="&#xE74D;" ToolTip="Move to the Recycle Bin"/>
             </StackPanel>
@@ -116,16 +115,21 @@
         <!-- Where and when -->
         <TextBlock x:Name="MetaText" Grid.Row="2" Margin="40,6,24,0" FontSize="12" Foreground="{DynamicResource Faint}" TextTrimming="CharacterEllipsis"/>
 
-        <!-- Details: the box you type in -->
-        <TextBox x:Name="BodyBox" Grid.Row="3" Style="{StaticResource PlainBox}" Tag="Write the details here…" Margin="38,18,6,0"
-                 FontSize="14.5" AcceptsReturn="True" AcceptsTab="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
-
-        <!-- Details while not typing: the same text, with every [[card]] drawn as a coloured box to click -->
-        <ScrollViewer x:Name="BodyView" Grid.Row="3" Margin="38,18,6,0" Background="Transparent" Focusable="False" Visibility="Collapsed"
-                      VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-            <TextBlock x:Name="BodyText" Margin="2,0,18,14" FontSize="14.5" TextWrapping="Wrap"
-                       LineHeight="29" LineStackingStrategy="BlockLineHeight" Foreground="{DynamicResource Text}"/>
-        </ScrollViewer>
+        <!-- Details: always editable. Parts saved as [[text]] are drawn as cards inside the text. -->
+        <RichTextBox x:Name="BodyBox" Grid.Row="3" Style="{StaticResource PlainRich}" Margin="38,18,6,0" FontSize="14.5"
+                     AcceptsTab="True" IsDocumentEnabled="True" AllowDrop="False" VerticalScrollBarVisibility="Auto">
+            <RichTextBox.Resources>
+                <!-- every line the same height, tall enough for a card -->
+                <Style TargetType="Paragraph">
+                    <Setter Property="Margin" Value="0"/>
+                    <Setter Property="LineHeight" Value="28"/>
+                    <Setter Property="LineStackingStrategy" Value="BlockLineHeight"/>
+                </Style>
+            </RichTextBox.Resources>
+            <FlowDocument PagePadding="2,0,14,14"/>
+        </RichTextBox>
+        <TextBlock x:Name="BodyHint" Grid.Row="3" Margin="42,22,24,0" VerticalAlignment="Top" FontSize="14.5" IsHitTestVisible="False"
+                   Foreground="{DynamicResource Faint}" Text="Write the details here…"/>
 
         <!-- Action dock -->
         <Grid Grid.Row="4" Margin="22,12,22,18">
