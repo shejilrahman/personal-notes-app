@@ -1,0 +1,1 @@
+i want an note app , that must store notes , it must appear when i click shift +cntrl A always and hide always , by default if it opended save the note in documents folder . provide adding note through mic also 
